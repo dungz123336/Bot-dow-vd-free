@@ -1,9 +1,11 @@
+# Railway: dùng Nixpacks (không bắt buộc Docker)
+# Nếu build Docker lỗi, xóa dòng builder hoặc để Railway tự detect
+
 [build]
-builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+builder = "NIXPACKS"
 
 [deploy]
+# Không dùng healthcheck HTTP — service worker/bot polling
+# (healthcheckPath hay làm deploy fail nếu chưa mở Public URL)
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
-healthcheckPath = "/api/health"
-healthcheckTimeout = 30
