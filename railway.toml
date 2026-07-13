@@ -1,4 +1,4 @@
-﻿# Railway — disable HTTP healthcheck (Worker has no HTTP; Web often fails HC)
+# Railway - no HTTP healthcheck (worker has no HTTP)
 [build]
 builder = "NIXPACKS"
 
