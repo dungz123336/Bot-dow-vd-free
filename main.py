@@ -1,12 +1,13 @@
 """
 Telegram Media Bot + Web Dashboard
-Chạy đồng thời bot polling + FastAPI (PORT do Railway inject).
+Railway-ready: web on PORT + long polling + keep-alive.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import threading
 import time
@@ -28,7 +29,6 @@ logger = logging.getLogger("main")
 
 
 def start_web_server() -> None:
-    """HTTP server — Railway/Web health (nếu bật) + dashboard."""
     import uvicorn
     from web.app import app
 
@@ -44,53 +44,99 @@ def start_web_server() -> None:
     asyncio.run(server.serve())
 
 
+def keep_alive_loop() -> None:
+    """
+    Self-ping public URL mỗi 4 phút — giảm khả năng host free sleep.
+    Railway inject: RAILWAY_PUBLIC_DOMAIN
+    """
+    import httpx
+
+    domain = (
+        os.getenv("RAILWAY_PUBLIC_DOMAIN")
+        or os.getenv("RAILWAY_STATIC_URL")
+        or os.getenv("KEEP_ALIVE_URL")
+        or ""
+    ).strip()
+    if not domain:
+        logger.info("Keep-alive: no public domain (OK if process stays always-on)")
+        return
+    if not domain.startswith("http"):
+        domain = "https://" + domain
+    url = domain.rstrip("/") + "/api/health"
+    logger.info("Keep-alive ping → %s", url)
+    while True:
+        try:
+            httpx.get(url, timeout=15)
+        except Exception as e:
+            logger.warning("Keep-alive ping failed: %s", e)
+        time.sleep(240)
+
+
 async def run_bot() -> None:
     token_ok = bool(BOT_TOKEN and ":" in BOT_TOKEN and "YOUR_BOT" not in BOT_TOKEN)
     if not token_ok:
         logger.error(
-            "❌ CHƯA CÓ BOT_TOKEN! Railway → Variables → BOT_TOKEN=... rồi Redeploy"
+            "❌ BOT_TOKEN THIẾU trên Railway!\n"
+            "Vào service → Variables → Add:\n"
+            "  BOT_TOKEN = token từ @BotFather\n"
+            "  ADMIN_ID  = 5949258698\n"
+            "Rồi Redeploy. Web 'Online' KHÔNG có nghĩa bot đang nhận tin."
         )
         stats.set_bot_online(False)
-        stats.set_last_error("BOT_TOKEN missing")
+        stats.set_last_error("BOT_TOKEN missing on Railway Variables")
         while True:
             await asyncio.sleep(3600)
         return
 
-    app = build_application(BOT_TOKEN)
-    logger.info("Starting Telegram bot polling...")
-    await app.initialize()
+    # Che token in logs
+    masked = BOT_TOKEN[:8] + "…" + BOT_TOKEN[-4:]
+    logger.info("BOT_TOKEN loaded: %s", masked)
 
-    try:
-        me = await app.bot.get_me()
-        logger.info("Bot online: @%s (id=%s)", me.username, me.id)
-        stats.set_bot_online(True)
-        stats.set_last_error(None)
-    except Exception as e:
-        logger.error("getMe failed: %s — retry 30s", e)
-        stats.set_bot_online(False)
-        stats.set_last_error(str(e))
-        await asyncio.sleep(30)
-        return await run_bot()
-
-    await app.start()
-    await app.updater.start_polling(
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"],
-    )
-
-    stop_event = asyncio.Event()
-    try:
-        await stop_event.wait()
-    except asyncio.CancelledError:
-        pass
-    finally:
-        stats.set_bot_online(False)
+    while True:
+        app = None
         try:
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
-        except Exception:
-            pass
+            app = build_application(BOT_TOKEN)
+            logger.info("Initializing Telegram application...")
+            await app.initialize()
+
+            me = await app.bot.get_me()
+            logger.info("✅ Bot online: @%s (id=%s)", me.username, me.id)
+            stats.set_bot_online(True)
+            stats.set_last_error(None)
+
+            # Xóa webhook nếu có — polling mới nhận tin
+            await app.bot.delete_webhook(drop_pending_updates=False)
+
+            await app.start()
+            await app.updater.start_polling(
+                drop_pending_updates=False,  # nhận tin đang treo
+                allowed_updates=["message", "callback_query"],
+                poll_interval=1.0,
+                timeout=30,
+            )
+            logger.info("Polling started — waiting for messages...")
+
+            # Block forever while polling
+            stop_event = asyncio.Event()
+            await stop_event.wait()
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("Bot loop error: %s — restart after 15s", e)
+            stats.set_bot_online(False)
+            stats.set_last_error(str(e))
+            await asyncio.sleep(15)
+        finally:
+            if app is not None:
+                try:
+                    if app.updater and app.updater.running:
+                        await app.updater.stop()
+                    if app.running:
+                        await app.stop()
+                    await app.shutdown()
+                except Exception:
+                    pass
 
 
 def main() -> None:
@@ -101,10 +147,12 @@ def main() -> None:
         bool(BOT_TOKEN and ":" in BOT_TOKEN and "YOUR_BOT" not in BOT_TOKEN),
     )
 
-    # Web TRƯỚC — bind PORT ngay (tránh healthcheck fail)
     web_thread = threading.Thread(target=start_web_server, name="web", daemon=True)
     web_thread.start()
     time.sleep(2.0)
+
+    ka = threading.Thread(target=keep_alive_loop, name="keepalive", daemon=True)
+    ka.start()
 
     try:
         asyncio.run(run_bot())
@@ -114,8 +162,6 @@ def main() -> None:
     except Exception as e:
         logger.exception("Fatal: %s", e)
         stats.set_bot_online(False)
-        stats.set_last_error(str(e))
-        # Giữ process sống để web + Railway không crash loop ngay
         while True:
             time.sleep(3600)
 

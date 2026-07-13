@@ -1,4 +1,4 @@
-# Railway - no HTTP healthcheck (worker has no HTTP)
+# One service only. Disable Healthcheck in Railway UI.
 [build]
 builder = "NIXPACKS"
 
