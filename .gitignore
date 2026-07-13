@@ -1,0 +1,16 @@
+.env
+downloads/
+data/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+.DS_Store
+test_img.jpg
+debug_yandex.html
+scripts/__pycache__/
+*.mp4
+*.jpg
+!web/**/*.css
+!web/**/*.js

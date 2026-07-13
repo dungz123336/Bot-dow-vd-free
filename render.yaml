@@ -1,0 +1,18 @@
+# Render.com — dùng Background Worker (không sleep như free web)
+# Dashboard: tạo service từ repo này, chọn Docker
+services:
+  - type: worker
+    name: telegram-media-bot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        value: "5949258698"
+      - key: ADMIN_ONLY
+        value: "false"
+      - key: DEFAULT_SPLIT_SECONDS
+        value: "30"
+      - key: WEB_PORT
+        value: "8080"

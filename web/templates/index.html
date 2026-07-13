@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Media Bot Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="bg-glow"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">▶</div>
+      <div>
+        <h1>Media Downloader Bot</h1>
+        <p class="subtitle">Telegram · Download · Split · Deliver</p>
+      </div>
+    </div>
+    <div class="status-pill" id="statusPill">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">Checking...</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="cards">
+      <article class="card">
+        <span class="label">Tổng job</span>
+        <strong id="statTotal">—</strong>
+      </article>
+      <article class="card success">
+        <span class="label">Thành công</span>
+        <strong id="statOk">—</strong>
+      </article>
+      <article class="card danger">
+        <span class="label">Thất bại</span>
+        <strong id="statFail">—</strong>
+      </article>
+      <article class="card">
+        <span class="label">Video đã gửi</span>
+        <strong id="statVideos">—</strong>
+      </article>
+      <article class="card">
+        <span class="label">Ảnh đã gửi</span>
+        <strong id="statImages">—</strong>
+      </article>
+      <article class="card">
+        <span class="label">Người dùng</span>
+        <strong id="statUsers">—</strong>
+      </article>
+    </section>
+
+    <section class="grid-2">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Cấu hình</h2>
+        </div>
+        <div class="kv">
+          <div><span>Admin ID</span><code>{{ admin_id }}</code></div>
+          <div><span>Admin only</span><code>{{ admin_only }}</code></div>
+          <div><span>Cắt mặc định</span><code>{{ default_split }}s</code></div>
+          <div><span>Giới hạn Telegram</span><code>{{ max_mb }} MB</code></div>
+          <div><span>Uptime</span><code id="uptime">—</code></div>
+        </div>
+        <div class="tips">
+          <h3>Cách dùng bot</h3>
+          <ol>
+            <li>Mở bot trên Telegram, gõ <code>/start</code></li>
+            <li>Gửi link video/ảnh/album</li>
+            <li>Chọn số giây cắt (15 / 30 / 60...) hoặc nhập tay</li>
+            <li>Bot tải → cắt → gửi lại trong chat</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Job gần đây</h2>
+          <button id="btnRefresh" class="btn">Làm mới</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Thời gian</th>
+                <th>User</th>
+                <th>Loại</th>
+                <th>Parts</th>
+                <th>Trạng thái</th>
+              </tr>
+            </thead>
+            <tbody id="recentBody">
+              <tr><td colspan="5" class="muted">Đang tải...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="lastError" class="error-box hidden"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Media Bot Dashboard · Admin {{ admin_id }}</span>
+  </footer>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
