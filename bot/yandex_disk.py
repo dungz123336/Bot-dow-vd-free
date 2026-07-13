@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -161,6 +162,27 @@ def _resource_map(store: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _pick_stream(videos: list[dict[str, Any]], max_height: int = 720) -> dict[str, Any] | None:
+    """Pick a stream: prefer fixed height <= max_height (faster/stable than adaptive on free hosts)."""
+    fixed: list[tuple[int, dict[str, Any]]] = []
+    adaptive = None
+    for v in videos:
+        if not v.get("url"):
+            continue
+        if v.get("dimension") == "adaptive":
+            adaptive = v
+            continue
+        h = int((v.get("size") or {}).get("height") or 0)
+        fixed.append((h, v))
+    # highest under max_height, else lowest above, else adaptive
+    under = [x for x in fixed if 0 < x[0] <= max_height]
+    if under:
+        return max(under, key=lambda x: x[0])[1]
+    if fixed:
+        return min(fixed, key=lambda x: x[0] if x[0] > 0 else 9999)[1]
+    return adaptive
+
+
 def _download_video_hls(
     client: httpx.Client,
     *,
@@ -169,13 +191,21 @@ def _download_video_hls(
     out: Path,
     referer: str,
     job: DownloadJob | None = None,
+    progress: ProgressCallback | None = None,
+    label: str = "",
+    timeout_sec: int = 480,
 ) -> bool:
     body = json.dumps({"hash": file_hash, "sk": sk}).encode()
-    r = client.post(
-        f"{PUBLIC_API}/get-video-streams",
-        content=body,
-        headers={"Content-Type": "text/plain", "Referer": referer, "Origin": "https://disk.yandex.com"},
-    )
+    try:
+        r = client.post(
+            f"{PUBLIC_API}/get-video-streams",
+            content=body,
+            headers={"Content-Type": "text/plain", "Referer": referer, "Origin": "https://disk.yandex.com"},
+            timeout=60.0,
+        )
+    except Exception as e:
+        logger.warning("get-video-streams request failed: %s", e)
+        return False
     if r.status_code != 200:
         logger.warning("get-video-streams HTTP %s: %s", r.status_code, r.text[:200])
         return False
@@ -188,24 +218,19 @@ def _download_video_hls(
     if not videos:
         return False
 
-    adaptive = None
-    best = None
-    best_h = -1
-    for v in videos:
-        if v.get("dimension") == "adaptive":
-            adaptive = v
-            continue
-        h = int((v.get("size") or {}).get("height") or 0)
-        if h >= best_h and v.get("url"):
-            best = v
-            best_h = h
-    stream = adaptive or best
+    stream = _pick_stream(videos, max_height=720)
     if not stream or not stream.get("url"):
         return False
 
+    # -nostdin -loglevel error: tránh treo; KHÔNG dùng PIPE (buffer đầy = deadlock)
     cmd = [
         FFMPEG,
         "-y",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-rw_timeout",
+        "30000000",  # 30s network timeout (microseconds)
         "-headers",
         f"Referer: {referer}\r\nUser-Agent: {UA}\r\n",
         "-i",
@@ -222,39 +247,53 @@ def _download_video_hls(
         creation = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             creationflags=creation,
         )
         if job is not None:
             job.active_proc = proc
+        started = time.time()
         try:
-            # Poll so we can honor pause/cancel
             while True:
                 if job is not None:
                     if job.is_cancelled():
                         proc.kill()
-                        proc.wait(timeout=5)
+                        try:
+                            proc.wait(timeout=5)
+                        except Exception:
+                            pass
                         out.unlink(missing_ok=True)
                         raise JobCancelled("Đã dừng tải theo yêu cầu.")
                     job.wait_if_paused()
+
                 ret = proc.poll()
                 if ret is not None:
                     break
-                # brief sleep
-                try:
-                    proc.wait(timeout=0.4)
-                except subprocess.TimeoutExpired:
-                    pass
-            stderr = ""
-            if proc.stderr:
-                try:
-                    stderr = proc.stderr.read() or ""
-                except Exception:
-                    pass
+
+                elapsed = int(time.time() - started)
+                if elapsed > timeout_sec:
+                    logger.warning("ffmpeg timeout after %ss for %s", timeout_sec, label or out.name)
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                    out.unlink(missing_ok=True)
+                    return False
+
+                # progress heartbeat mỗi ~15s
+                if progress and elapsed > 0 and elapsed % 15 == 0:
+                    try:
+                        progress(f"⏳ {label or out.name} · ffmpeg {elapsed}s...")
+                    except Exception:
+                        pass
+
+                time.sleep(0.5)
+
             if proc.returncode != 0 or not out.exists() or out.stat().st_size < 1000:
-                logger.warning("ffmpeg hls failed: %s", stderr[-500:])
+                logger.warning("ffmpeg hls failed code=%s file=%s", proc.returncode, label or out.name)
                 out.unlink(missing_ok=True)
                 return False
             return True
@@ -307,6 +346,7 @@ def download_yandex_disk(
                 progress(f"📂 «{title}» — {len(media_items)} file. Bắt đầu tải...")
 
             results: list[tuple[Path, str, int]] = []
+            skipped = 0
             total = len(media_items)
             if job is not None:
                 job.set_progress(0, total, f"Yandex · {total} file")
@@ -318,22 +358,44 @@ def download_yandex_disk(
                         raise JobCancelled("Đã dừng tải theo yêu cầu.")
                     job.set_progress(idx, total, f"Yandex [{idx}/{total}]")
 
+                # Refresh sk mỗi 5 file video (token Yandex hết hạn → treo)
+                if kind == "video" and idx > 1 and (idx % 5 == 1 or not sk):
+                    try:
+                        store2, sk2, _ = _get_store_context(client, public_url)
+                        if sk2:
+                            sk = sk2
+                        if store2:
+                            res_by_name = _resource_map(store2)
+                            root = (store2.get("resources") or {}).get(store2.get("rootResourceId") or "")
+                            root_hash = (root or {}).get("hash") or root_hash
+                        if progress:
+                            progress(f"🔄 Gia hạn session Yandex… [{idx}/{total}]")
+                    except Exception as e:
+                        logger.warning("refresh sk failed: %s", e)
+
                 name = _safe_name(item.get("name") or f"file_{idx}")
+                size_mb = (item.get("size") or 0) / (1024 * 1024)
                 out = work_dir / name
                 if out.exists():
                     out = work_dir / f"{idx:03d}_{name}"
 
                 if progress:
-                    progress(f"⬇️ Yandex [{idx}/{total}] {name[:48]} ({kind})")
+                    progress(
+                        f"⬇️ [{idx}/{total}] {name[:40]} ({kind}"
+                        + (f", ~{size_mb:.1f}MB" if size_mb else "")
+                        + ")"
+                    )
 
                 ok = False
                 try:
                     if kind == "image":
                         ok = _download_image(client, item, out)
                     else:
-                        # video via HLS
                         if not sk:
                             logger.warning("No sk cookie for video %s", name)
+                            skipped += 1
+                            if progress:
+                                progress(f"⚠️ Bỏ qua [{idx}/{total}] (hết session)")
                             continue
                         res = res_by_name.get(item.get("name") or "")
                         file_hash = (res or {}).get("path")
@@ -341,10 +403,12 @@ def download_yandex_disk(
                             file_hash = _build_path_hash(root_hash, item.get("name") or name)
                         if not file_hash:
                             logger.warning("No path hash for %s", name)
+                            skipped += 1
                             continue
-                        # ensure mp4 extension for ffmpeg output
                         if out.suffix.lower() not in VIDEO_EXTS:
                             out = out.with_suffix(".mp4")
+                        # timeout theo dung lượng (tối thiểu 3 phút, tối đa 12 phút)
+                        t_out = max(180, min(720, int(120 + size_mb * 25)))
                         ok = _download_video_hls(
                             client,
                             file_hash=file_hash,
@@ -352,7 +416,31 @@ def download_yandex_disk(
                             out=out,
                             referer=public_url,
                             job=job,
+                            progress=progress,
+                            label=f"[{idx}/{total}] {name[:30]}",
+                            timeout_sec=t_out,
                         )
+                        # 1 lần retry nếu fail
+                        if not ok and not (job and job.is_cancelled()):
+                            if progress:
+                                progress(f"🔁 Thử lại [{idx}/{total}] {name[:36]}…")
+                            try:
+                                _, sk3, _ = _get_store_context(client, public_url)
+                                if sk3:
+                                    sk = sk3
+                            except Exception:
+                                pass
+                            ok = _download_video_hls(
+                                client,
+                                file_hash=file_hash,
+                                sk=sk,
+                                out=out,
+                                referer=public_url,
+                                job=job,
+                                progress=progress,
+                                label=f"retry [{idx}/{total}]",
+                                timeout_sec=t_out,
+                            )
                 except JobCancelled:
                     raise
                 except Exception as e:
@@ -363,9 +451,14 @@ def download_yandex_disk(
                     results.append((out, kind, out.stat().st_size))
                 else:
                     out.unlink(missing_ok=True)
+                    skipped += 1
+                    if progress:
+                        progress(f"⚠️ Bỏ qua [{idx}/{total}] {name[:36]} — tiếp tục…")
 
             if not results:
                 return False, title, [], "Không tải được file nào từ Yandex Disk."
+            if progress and skipped:
+                progress(f"✅ Tải xong {len(results)}/{total} (bỏ qua {skipped})")
             return True, title, results, None
 
     except JobCancelled:

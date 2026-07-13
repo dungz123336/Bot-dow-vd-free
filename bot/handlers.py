@@ -428,12 +428,13 @@ async def _process_job(
         )
 
     def progress(msg: str) -> None:
-        """Thread-safe progress (yt-dlp / yandex run in worker threads)."""
+        """Thread-safe progress — không block lâu (tránh kẹt download thread)."""
+        job.message = msg
         try:
             fut = asyncio.run_coroutine_threadsafe(_progress_async(msg), loop)
-            fut.result(timeout=10)
+            fut.result(timeout=3)
         except Exception:
-            job.message = msg
+            pass
 
     try:
         await bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
