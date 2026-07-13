@@ -1,7 +1,9 @@
 .env
+.env.local
 downloads/
 data/
 __pycache__/
+**/__pycache__/
 *.pyc
 .venv/
 venv/
@@ -9,8 +11,8 @@ venv/
 .DS_Store
 test_img.jpg
 debug_yandex.html
-scripts/__pycache__/
+scripts/
 *.mp4
 *.jpg
-!web/**/*.css
-!web/**/*.js
+!web/**/*
+

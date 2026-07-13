@@ -1,9 +1,6 @@
 """
 Telegram Media Bot + Web Dashboard
-----------------------------------
-Chạy đồng thời:
-  - Bot Telegram (long polling)
-  - Web dashboard FastAPI
+Chạy đồng thời bot polling + FastAPI (PORT do Railway inject).
 """
 
 from __future__ import annotations
@@ -12,9 +9,9 @@ import asyncio
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 
-# Ensure project root on path
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -31,9 +28,11 @@ logger = logging.getLogger("main")
 
 
 def start_web_server() -> None:
+    """HTTP server — Railway/Web health (nếu bật) + dashboard."""
     import uvicorn
     from web.app import app
 
+    logger.info("Starting web on %s:%s", WEB_HOST, WEB_PORT)
     config = uvicorn.Config(
         app,
         host=WEB_HOST,
@@ -42,55 +41,43 @@ def start_web_server() -> None:
         access_log=False,
     )
     server = uvicorn.Server(config)
-    # Chạy trong thread với event loop riêng
     asyncio.run(server.serve())
 
 
 async def run_bot() -> None:
-    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or ":" not in BOT_TOKEN:
+    token_ok = bool(BOT_TOKEN and ":" in BOT_TOKEN and "YOUR_BOT" not in BOT_TOKEN)
+    if not token_ok:
         logger.error(
-            "❌ CHƯA CÓ BOT_TOKEN trên Railway!\n"
-            "Vào Project → Variables → thêm:\n"
-            "  BOT_TOKEN = token từ @BotFather\n"
-            "  ADMIN_ID  = 5949258698\n"
-            "Rồi Redeploy."
+            "❌ CHƯA CÓ BOT_TOKEN! Railway → Variables → BOT_TOKEN=... rồi Redeploy"
         )
         stats.set_bot_online(False)
-        stats.set_last_error("BOT_TOKEN chưa được cấu hình (Railway Variables)")
-        # Giữ process sống (tránh crash loop) + web health vẫn chạy
+        stats.set_last_error("BOT_TOKEN missing")
         while True:
             await asyncio.sleep(3600)
         return
 
     app = build_application(BOT_TOKEN)
-
     logger.info("Starting Telegram bot polling...")
     await app.initialize()
+
     try:
         me = await app.bot.get_me()
         logger.info("Bot online: @%s (id=%s)", me.username, me.id)
         stats.set_bot_online(True)
         stats.set_last_error(None)
     except Exception as e:
-        # Không crash process — log lỗi (token sai / mạng) và retry
-        logger.error("Không kết nối được bot: %s — retry sau 30s", e)
+        logger.error("getMe failed: %s — retry 30s", e)
         stats.set_bot_online(False)
         stats.set_last_error(str(e))
         await asyncio.sleep(30)
         return await run_bot()
 
     await app.start()
-    try:
-        await app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
-        )
-    except Exception as e:
-        logger.error("start_polling failed: %s", e)
-        stats.set_last_error(str(e))
-        raise
+    await app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],
+    )
 
-    # Keep alive until cancelled
     stop_event = asyncio.Event()
     try:
         await stop_event.wait()
@@ -109,14 +96,15 @@ async def run_bot() -> None:
 def main() -> None:
     logger.info("=== Telegram Media Bot starting ===")
     logger.info("WEB host=%s port=%s", WEB_HOST, WEB_PORT)
-    logger.info("BOT_TOKEN set: %s", bool(BOT_TOKEN and ":" in BOT_TOKEN and "YOUR_BOT" not in BOT_TOKEN))
+    logger.info(
+        "BOT_TOKEN set: %s",
+        bool(BOT_TOKEN and ":" in BOT_TOKEN and "YOUR_BOT" not in BOT_TOKEN),
+    )
 
+    # Web TRƯỚC — bind PORT ngay (tránh healthcheck fail)
     web_thread = threading.Thread(target=start_web_server, name="web", daemon=True)
     web_thread.start()
-    # Cho web bind PORT trước (Railway health / proxy)
-    import time
-
-    time.sleep(1.5)
+    time.sleep(2.0)
 
     try:
         asyncio.run(run_bot())
@@ -127,8 +115,9 @@ def main() -> None:
         logger.exception("Fatal: %s", e)
         stats.set_bot_online(False)
         stats.set_last_error(str(e))
-        # Exit non-zero so Railway restarts
-        raise
+        # Giữ process sống để web + Railway không crash loop ngay
+        while True:
+            time.sleep(3600)
 
 
 if __name__ == "__main__":

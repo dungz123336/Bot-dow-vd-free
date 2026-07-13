@@ -1,9 +1,8 @@
-# Railway/Nixpacks — không cần Docker vẫn có FFmpeg
 [phases.setup]
 nixPkgs = ["ffmpeg", "python312"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["python -m pip install -r requirements.txt"]
 
 [start]
 cmd = "python main.py"
